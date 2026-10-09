@@ -1,0 +1,28 @@
+* { box-sizing: border-box; }
+body { margin: 0; overflow: hidden; background: #0b1830; color: #eee; font: 14px system-ui, sans-serif; user-select: none; }
+canvas { position: fixed; inset: 0; display: block; }
+.hidden { display: none !important; }
+.panel { position: fixed; background: rgba(15, 20, 35, 0.85); border: 1px solid #334; border-radius: 8px; padding: 10px; }
+.center { left: 50%; top: 50%; transform: translate(-50%, -50%); min-width: 320px; display: flex; flex-direction: column; gap: 8px; }
+.row { display: flex; gap: 6px; align-items: center; }
+h1 { margin: 0 0 8px; text-align: center; letter-spacing: 2px; }
+button { background: #2a3a66; color: #fff; border: 1px solid #456; border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; }
+button:hover { background: #3a4f88; }
+button.on { background: #b8892a; }
+input { background: #111a2e; color: #fff; border: 1px solid #456; border-radius: 6px; padding: 6px; font: inherit; }
+input[type=number] { width: 60px; }
+#lobbies { display: flex; flex-direction: column; gap: 6px; }
+#stats { left: 10px; top: 10px; line-height: 1.5; min-width: 200px; }
+#board { right: 10px; top: 10px; min-width: 220px; }
+#board div { display: flex; justify-content: space-between; gap: 10px; }
+#board .me { color: #ffd34d; }
+#log { left: 10px; bottom: 80px; max-width: 380px; font-size: 13px; pointer-events: auto; }
+#log:empty { display: none; }
+#log button { margin-left: 6px; padding: 2px 6px; }
+#bar { left: 50%; bottom: 10px; transform: translateX(-50%); display: flex; gap: 6px; align-items: center; }
+#spawn { left: 50%; top: 10px; transform: translateX(-50%); text-align: center; }
+#spawn button { margin: 4px 2px 0; }
+#ctx { display: flex; flex-direction: column; gap: 4px; min-width: 170px; }
+#ctx .emo { display: flex; gap: 2px; }
+#ctx .emo button { padding: 2px 5px; }
+#over { text-align: center; font-size: 18px; }

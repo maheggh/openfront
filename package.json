@@ -1,0 +1,22 @@
+{
+  "name": "frontfall",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n client,server \"vite\" \"tsx watch src/server/index.ts\"",
+    "build": "vite build",
+    "start": "tsx src/server/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "tsx": "^4.23.15",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/ws": "^8.18.2",
+    "concurrently": "^10.0.6",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  }
+}
