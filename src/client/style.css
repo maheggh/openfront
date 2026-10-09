@@ -9,6 +9,9 @@ h1 { margin: 0 0 8px; text-align: center; letter-spacing: 2px; }
 button { background: #2a3a66; color: #fff; border: 1px solid #456; border-radius: 6px; padding: 6px 10px; cursor: pointer; font: inherit; }
 button:hover { background: #3a4f88; }
 button.on { background: #b8892a; }
+button.poor { opacity: 0.5; }
+#toast { left: 50%; top: 70px; transform: translateX(-50%); z-index: 10; background: rgba(120, 30, 30, 0.9); pointer-events: none; }
+#ctx small { color: #aab; }
 input { background: #111a2e; color: #fff; border: 1px solid #456; border-radius: 6px; padding: 6px; font: inherit; }
 input[type=number] { width: 60px; }
 #lobbies { display: flex; flex-direction: column; gap: 6px; }

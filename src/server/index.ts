@@ -4,15 +4,16 @@ import { extname, join, normalize } from 'path';
 import { WebSocket, WebSocketServer } from 'ws';
 import { botName, ClientMsg, GameConfig, Intent, ServerMsg, TICK_MS } from '../core/types';
 
-interface Client { ws: WebSocket; name: string; id: number; room?: Room }
+interface Client { ws: WebSocket; cid: string; name: string; id: number; room?: Room }
 interface Room {
-  code: string; isPublic: boolean; clients: Client[]; host?: Client; bots: number;
-  startAt: number; started: boolean; intents: Intent[]; timer?: ReturnType<typeof setInterval>;
+  code: string; isPublic: boolean; clients: Client[]; host?: Client; bots: number; startAt: number; started: boolean;
+  config?: GameConfig; intents: Intent[]; turns: Intent[][]; members: Map<string, number>; hashes: Map<number, number>;
+  emptySince: number; timer?: ReturnType<typeof setInterval>;
 }
 
 const PORT = Number(process.env.PORT ?? 3001);
 const DIST = join(process.cwd(), 'dist');
-const PUBLIC_WAIT_MS = 30000, MAX_HUMANS = 12;
+const PUBLIC_WAIT_MS = 30000, MAX_HUMANS = 12, EMPTY_GRACE_MS = 60000;
 const MIME: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png' };
 const rooms = new Map<string, Room>();
 
@@ -21,7 +22,7 @@ const send = (c: Client, m: ServerMsg) => { if (c.ws.readyState === WebSocket.OP
 function newRoom(isPublic: boolean, bots: number) {
   let code = '';
   do code = Math.random().toString(36).slice(2, 7).toUpperCase(); while (rooms.has(code));
-  const r: Room = { code, isPublic, clients: [], bots, startAt: 0, started: false, intents: [] };
+  const r: Room = { code, isPublic, clients: [], bots, startAt: 0, started: false, intents: [], turns: [], members: new Map(), hashes: new Map(), emptySince: 0 };
   rooms.set(code, r);
   return r;
 }
@@ -63,18 +64,53 @@ function start(r: Room) {
     ...r.clients.map(c => ({ name: c.name, bot: false })),
     ...Array.from({ length: r.bots }, (_, i) => ({ name: botName(i), bot: true })),
   ];
-  const config: GameConfig = { seed: Math.floor(Math.random() * 2 ** 31), players };
-  r.clients.forEach((c, i) => { c.id = i + 1; send(c, { t: 'start', config, me: c.id }); });
+  const config: GameConfig = (r.config = { seed: Math.floor(Math.random() * 2 ** 31), players });
+  r.clients.forEach((c, i) => {
+    c.id = i + 1;
+    r.members.set(c.cid, c.id);
+    send(c, { t: 'start', config, me: c.id });
+  });
   r.timer = setInterval(() => {
-    if (!r.clients.length) { clearInterval(r.timer); rooms.delete(r.code); return; }
+    if (r.clients.length) r.emptySince = 0;
+    else if (!r.emptySince) r.emptySince = Date.now();
+    else if (Date.now() - r.emptySince > EMPTY_GRACE_MS) { clearInterval(r.timer); rooms.delete(r.code); return; }
+    r.turns.push(r.intents);
     const msg = JSON.stringify({ t: 'turn', intents: r.intents });
     r.intents = [];
     for (const c of r.clients) if (c.ws.readyState === WebSocket.OPEN) c.ws.send(msg);
   }, TICK_MS);
 }
 
+function rejoin(c: Client) {
+  for (const r of rooms.values()) {
+    const id = r.started ? r.members.get(c.cid) : undefined;
+    if (!id || !r.config) continue;
+    r.clients = r.clients.filter(x => x.cid !== c.cid);
+    r.clients.push(c);
+    c.room = r;
+    c.id = id;
+    return send(c, { t: 'start', config: r.config, me: id, turns: r.turns });
+  }
+}
+
+function checkHash(c: Client, tick: number, hash: number) {
+  const r = c.room;
+  if (!r?.started) return;
+  const h = r.hashes.get(tick);
+  if (h === undefined) {
+    r.hashes.set(tick, hash);
+    if (r.hashes.size > 50) r.hashes.delete(r.hashes.keys().next().value!);
+  } else if (h !== hash) {
+    console.warn(`[${r.code}] desync at tick ${tick}: player ${c.id} (${c.name}) disagrees`);
+    send(c, { t: 'desync', tick });
+  }
+}
+
 function handle(c: Client, m: ClientMsg) {
   switch (m.t) {
+    case 'hello':
+      c.cid = String(m.cid).slice(0, 40);
+      return rejoin(c);
     case 'list': {
       publicRoom();
       const lobbies = [...rooms.values()].filter(r => r.isPublic && !r.started)
@@ -97,6 +133,9 @@ function handle(c: Client, m: ClientMsg) {
       return;
     case 'intent':
       if (c.room?.started && c.id && typeof m.intent?.type === 'string') c.room.intents.push({ ...m.intent, p: c.id } as Intent);
+      return;
+    case 'hash':
+      return checkHash(c, Number(m.tick), Number(m.hash));
   }
 }
 
@@ -126,7 +165,7 @@ const server = createServer(async (req, res) => {
 });
 
 new WebSocketServer({ server, path: '/ws' }).on('connection', ws => {
-  const c: Client = { ws, name: 'Player', id: 0 };
+  const c: Client = { ws, cid: '', name: 'Player', id: 0 };
   ws.on('message', raw => {
     try { handle(c, JSON.parse(String(raw))); } catch { /* ignore malformed */ }
   });
