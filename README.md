@@ -39,11 +39,34 @@ Cities (+max troops), ports (gold + automatic trade ships to other players' port
 
 Deterministic lockstep: the server only collects intents and broadcasts them every 100 ms turn; every client runs the same simulation (`src/core`) from a shared seed. Singleplayer runs the same loop locally without a server.
 
-- **Reconnect**: each tab has a client id; after a disconnect the page reloads, and the server sends the game config plus the full turn history so the client replays to the current state. Rooms survive 60s with nobody connected.
-- **Desync detection**: every 50 ticks clients send a state hash; the server logs mismatches and warns the affected client.
+- **Smooth playback**: turns go into a queue and are played at a steady 100 ms pace from `requestAnimationFrame`; when more than 2 turns are queued the client catches up in time-sliced chunks (8 ms per frame, 30 ms when far behind). Rendering interpolates ships, nukes and blasts between ticks.
+- **Background tabs**: when the tab is hidden, turns are applied as soon as they arrive (message-driven, no timers), so the game never falls behind; heartbeats also piggyback on incoming turns.
+- **Optimistic feedback**: your own actions show a pulsing marker immediately until the turn containing them is applied.
+- **Reconnect**: each tab has a client id; after a disconnect the page reloads, and the server sends the config plus the full turn history, which is replayed in chunks with a "catching up" indicator. Rooms survive 60s with nobody connected.
+- **Desync detection**: every 50 ticks clients send a state hash; the server logs mismatches and the affected client automatically reloads and replays once.
+- **Server hardening**: compact turn messages (empty turns are `{"t":"turn"}`), intent shape validation, 20 intents/s rate limit, 64 KB message cap, ping/RTT (shown in the HUD), idle sockets dropped after 15s, and clients with a backed-up send buffer are dropped so they reconnect and replay.
+- **Performance**: only changed tiles are repainted; each player keeps an incremental border-tile set and territory centroid, so attacks, bots and click checks no longer scan the whole map; trade routes are cached until the sea rises.
 
 ```
-src/core    shared simulation: map generation, rules, bots, message types
-src/server  Node + ws lobby/turn relay (and static file server for production)
-src/client  Vite + Canvas 2D renderer and plain DOM UI
+src/core/
+  config.ts     all tuning constants, costs, doctrines
+  types.ts      intents, protocol messages, intent validation
+  map.ts        procedural map + tile helpers
+  game.ts       Game state, queries, ownership, turn step and intent dispatch
+  attack.ts     land attacks
+  units.ts      transports, trade ships, warships, nukes, water pathfinding
+  economy.ts    building and income/regen
+  diplomacy.ts  alliances, embargo, spies, sabotage, bounties
+  world.ts      storms, rising sea
+  bots.ts       AI
+src/server/     Node + ws lobby/turn relay (and static file server for production)
+src/client/
+  main.ts       menu, lobby, game start
+  net.ts        WebSocket, heartbeat
+  runner.ts     turn queue, pacing, catch-up, pending intents
+  render.ts     canvas renderer
+  ui.ts         HUD, build bar, context menu
+  input.ts      mouse and keyboard
+  actions.ts    player actions with client-side checks
+  dom.ts        small DOM helpers
 ```

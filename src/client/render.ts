@@ -1,10 +1,11 @@
-import { DAY, Game, neighbors, NIGHT_START, NUKE_R } from '../core/game';
-import { FERTILE, GOLD, H, HIGHLANDS, MOUNTAINS, OIL, PLAINS, SEA, W, WATER } from '../core/map';
-import { TICK_MS } from '../core/types';
+import { BLAST_TICKS, DAY, EMOJI_TICKS, NIGHT_START, NUKE_R, TICK_MS, WARSHIP_HP } from '../core/config';
+import type { Game } from '../core/game';
+import { FERTILE, GOLD, H, HIGHLANDS, MOUNTAINS, neighbors, OIL, PLAINS, SEA, W, WATER } from '../core/map';
+import { fmt } from './dom';
+import type { Pending } from './runner';
 
 const ICON: Record<string, string> = { city: '🏠', port: '⚓', defense: '🛡', silo: '🚀', sam: '📡' };
-
-export const fmt = (n: number) => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.floor(n)));
+const MIN_SCALE = 0.5, MAX_SCALE = 40, ZOOM_EASE = 0.25, NIGHT_ALPHA = 0.45, NIGHT_FADE = 60, MIN_LABEL_PX = 7;
 
 export class Renderer {
   ctx: CanvasRenderingContext2D;
@@ -17,10 +18,11 @@ export class Renderer {
   target = 1;
   ox = 0;
   oy = 0;
-  ax = 0;
-  ay = 0;
   hover = 0;
-  stepAt = 0;
+  private painted = 0;
+  private ax = 0;
+  private ay = 0;
+  private alpha = 0;
 
   constructor(public canvas: HTMLCanvasElement, public g: Game, public me: number) {
     this.ctx = canvas.getContext('2d')!;
@@ -44,7 +46,7 @@ export class Renderer {
   }
 
   zoom(sx: number, sy: number, f: number) {
-    this.target = Math.min(40, Math.max(0.5, this.target * f));
+    this.target = Math.min(MAX_SCALE, Math.max(MIN_SCALE, this.target * f));
     this.ax = sx;
     this.ay = sy;
   }
@@ -52,7 +54,38 @@ export class Renderer {
   sx(i: number) { return this.ox + ((i % W) + 0.5) * this.scale; }
   sy(i: number) { return this.oy + (((i / W) | 0) + 0.5) * this.scale; }
 
-  buildBase() {
+  draw(stepAt: number, pending: Pending[]) {
+    const now = performance.now();
+    this.alpha = Math.min(1, (now - stepAt) / TICK_MS);
+    this.easeZoom();
+    this.paintMap();
+    const ctx = this.ctx, sc = this.scale;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#081226';
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.off, this.ox, this.oy, W * sc, H * sc);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    this.drawStorms();
+    this.drawNight();
+    this.drawStructures();
+    this.drawShips();
+    this.drawNukes();
+    this.drawLabels();
+    this.drawPending(pending, now);
+  }
+
+  private easeZoom() {
+    if (Math.abs(this.target - this.scale) < 1e-3) return;
+    const s = this.scale + (this.target - this.scale) * ZOOM_EASE;
+    this.ox = this.ax - ((this.ax - this.ox) * s) / this.scale;
+    this.oy = this.ay - ((this.ay - this.oy) * s) / this.scale;
+    this.scale = s;
+  }
+
+  private buildBase() {
     const { terrain, height, resource } = this.g.map;
     for (let i = 0; i < W * H; i++) {
       const h = height[i], t = terrain[i], r = resource[i], x = i % W, y = (i / W) | 0;
@@ -76,114 +109,117 @@ export class Renderer {
     this.version = this.g.terrainVersion;
   }
 
-  draw() {
-    const g = this.g, ctx = this.ctx, o = g.owner, d = this.img.data, b = this.base;
-    if (Math.abs(this.target - this.scale) > 1e-3) {
-      const s = this.scale + (this.target - this.scale) * 0.25;
-      this.ox = this.ax - ((this.ax - this.ox) * s) / this.scale;
-      this.oy = this.ay - ((this.ay - this.oy) * s) / this.scale;
-      this.scale = s;
+  private paint(i: number) {
+    const g = this.g, id = g.owner[i], b = this.base, d = this.img.data, k = i * 4;
+    let r = b[i * 3], gg = b[i * 3 + 1], bb = b[i * 3 + 2];
+    if (id) {
+      const p = g.players[id - 1], c = p.color;
+      if (!p.border.has(i)) { r = r * 0.45 + c[0] * 0.55; gg = gg * 0.45 + c[1] * 0.55; bb = bb * 0.45 + c[2] * 0.55; }
+      else if (id === this.hover) { r = 255 - (255 - c[0]) * 0.3; gg = 255 - (255 - c[1]) * 0.3; bb = 255 - (255 - c[2]) * 0.3; }
+      else { r = c[0] * 0.5; gg = c[1] * 0.5; bb = c[2] * 0.5; }
     }
-    if (this.version !== g.terrainVersion) this.buildBase();
-    const cs = g.players.map(() => ({ x: 0, y: 0, n: 0 }));
-    for (let y = 0, i = 0; y < H; y++) for (let x = 0; x < W; x++, i++) {
-      const id = o[i];
-      let r = b[i * 3], gg = b[i * 3 + 1], bb = b[i * 3 + 2];
-      if (id) {
-        const c = g.players[id - 1].color, cc = cs[id - 1];
-        cc.x += x; cc.y += y; cc.n++;
-        const edge = (x > 0 && o[i - 1] !== id) || (x < W - 1 && o[i + 1] !== id) || (y > 0 && o[i - W] !== id) || (y < H - 1 && o[i + W] !== id);
-        if (edge && id === this.hover) { r = 255 - (255 - c[0]) * 0.3; gg = 255 - (255 - c[1]) * 0.3; bb = 255 - (255 - c[2]) * 0.3; }
-        else if (edge) { r = c[0] * 0.5; gg = c[1] * 0.5; bb = c[2] * 0.5; }
-        else { r = r * 0.45 + c[0] * 0.55; gg = gg * 0.45 + c[1] * 0.55; bb = bb * 0.45 + c[2] * 0.55; }
-      }
-      d[i * 4] = r; d[i * 4 + 1] = gg; d[i * 4 + 2] = bb; d[i * 4 + 3] = 255;
+    d[k] = r; d[k + 1] = gg; d[k + 2] = bb; d[k + 3] = 255;
+  }
+
+  // Repaints only tiles changed since the last frame (plus neighbors, whose border shading depends on them).
+  private paintMap() {
+    const g = this.g;
+    if (this.version !== g.terrainVersion || g.dirty.length >= W * H) {
+      this.buildBase();
+      for (let i = 0; i < W * H; i++) this.paint(i);
+    } else for (const i of g.dirty) {
+      this.paint(i);
+      for (const n of neighbors(i)) this.paint(n);
+    }
+    g.dirty.length = 0;
+    if (this.hover !== this.painted) {
+      for (const id of [this.hover, this.painted]) if (id) for (const i of g.pl(id).border) this.paint(i);
+      this.painted = this.hover;
     }
     this.offCtx.putImageData(this.img, 0, 0);
+  }
 
-    const cw = this.canvas.width, ch = this.canvas.height, sc = this.scale;
-    const alpha = Math.min(1, (performance.now() - this.stepAt) / TICK_MS);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#081226';
-    ctx.fillRect(0, 0, cw, ch);
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(this.off, this.ox, this.oy, W * sc, H * sc);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.lineJoin = 'round';
-
-    for (const s of g.storms) {
+  private drawStorms() {
+    const ctx = this.ctx, sc = this.scale;
+    for (const s of this.g.storms) {
       const x = this.ox + s.x * sc, y = this.oy + s.y * sc, R = s.r * sc;
-      const grad = ctx.createRadialGradient(x, y, 0, x, y, R);
-      const flash = Math.random() < 0.01 ? 0.3 : 0;
-      grad.addColorStop(0, `rgba(${60 + flash * 500},${70 + flash * 500},${100 + flash * 400},0.55)`);
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, R), flash = Math.random() < 0.01 ? 150 : 0;
+      grad.addColorStop(0, `rgba(${60 + flash},${70 + flash},${100 + flash},0.55)`);
       grad.addColorStop(0.7, 'rgba(80,90,120,0.35)');
       grad.addColorStop(1, 'rgba(80,90,120,0)');
       ctx.fillStyle = grad;
       ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
     }
+  }
 
-    const t = g.tick % DAY;
-    const night = t >= NIGHT_START ? 0.45 * Math.min(1, (t - NIGHT_START) / 60, (DAY - t) / 60) : 0;
-    if (night > 0) {
-      ctx.fillStyle = `rgba(5,10,45,${night})`;
-      ctx.fillRect(0, 0, cw, ch);
-      for (const s of g.structures.values()) {
-        if (s.type !== 'city') continue;
-        const x = this.sx(s.tile), y = this.sy(s.tile), R = 8 * sc;
-        const grad = ctx.createRadialGradient(x, y, 0, x, y, R);
-        grad.addColorStop(0, `rgba(255,220,120,${night})`);
-        grad.addColorStop(1, 'rgba(255,220,120,0)');
-        ctx.fillStyle = grad;
-        ctx.fillRect(x - R, y - R, 2 * R, 2 * R);
-      }
+  private drawNight() {
+    const ctx = this.ctx, t = this.g.tick % DAY;
+    const a = t >= NIGHT_START ? NIGHT_ALPHA * Math.min(1, (t - NIGHT_START) / NIGHT_FADE, (DAY - t) / NIGHT_FADE) : 0;
+    if (a <= 0) return;
+    ctx.fillStyle = `rgba(5,10,45,${a})`;
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    for (const s of this.g.structures.values()) {
+      if (s.type !== 'city') continue;
+      const x = this.sx(s.tile), y = this.sy(s.tile), R = 8 * this.scale;
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, R);
+      grad.addColorStop(0, `rgba(255,220,120,${a})`);
+      grad.addColorStop(1, 'rgba(255,220,120,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(x - R, y - R, 2 * R, 2 * R);
     }
+  }
 
-    const icon = Math.min(30, Math.max(10, sc * 3.2));
+  private drawStructures() {
+    const ctx = this.ctx, g = this.g, size = Math.min(30, Math.max(10, this.scale * 3.2));
     for (const s of g.structures.values()) {
-      const x = this.sx(s.tile), y = this.sy(s.tile);
+      const x = this.sx(s.tile), y = this.sy(s.tile), on = g.active(s);
       ctx.globalAlpha = s.readyAt > g.tick ? 0.55 : 1;
-      ctx.fillStyle = g.active(s) ? `rgb(${g.pl(s.owner).color})` : '#555';
+      ctx.fillStyle = on ? `rgb(${g.pl(s.owner).color})` : '#555';
       ctx.strokeStyle = '#000';
       ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(x, y, icon / 2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      ctx.font = `${icon * 0.6}px sans-serif`;
+      ctx.beginPath(); ctx.arc(x, y, size / 2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.font = `${size * 0.6}px sans-serif`;
       ctx.fillText(ICON[s.type], x, y + 1);
-      if (!g.active(s)) {
+      if (!on) {
         ctx.strokeStyle = '#f33';
         ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.moveTo(x - icon / 2, y - icon / 2); ctx.lineTo(x + icon / 2, y + icon / 2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x - size / 2, y - size / 2); ctx.lineTo(x + size / 2, y + size / 2); ctx.stroke();
       }
     }
     ctx.globalAlpha = 1;
+  }
 
-    const ship = Math.min(16, Math.max(5, sc * 2));
+  private drawShips() {
+    const ctx = this.ctx, g = this.g, size = Math.min(16, Math.max(5, this.scale * 2));
     for (const s of g.ships) {
       if (s.done) continue;
-      const nxt = s.path[Math.min(s.pos + 1, s.path.length - 1)] ?? s.tile;
-      const x = this.sx(s.tile) + (this.sx(nxt) - this.sx(s.tile)) * alpha;
-      const y = this.sy(s.tile) + (this.sy(nxt) - this.sy(s.tile)) * alpha;
+      const next = s.path[Math.min(s.pos + 1, s.path.length - 1)] ?? s.tile;
+      const x = this.sx(s.tile) + (this.sx(next) - this.sx(s.tile)) * this.alpha;
+      const y = this.sy(s.tile) + (this.sy(next) - this.sy(s.tile)) * this.alpha;
       ctx.fillStyle = s.kind === 'trade' ? '#f2c94c' : s.kind === 'war' ? '#3a3f4a' : '#fff';
       ctx.strokeStyle = `rgb(${g.pl(s.p).color})`;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      if (s.kind === 'war') { ctx.moveTo(x, y - ship); ctx.lineTo(x + ship * 0.7, y + ship * 0.6); ctx.lineTo(x - ship * 0.7, y + ship * 0.6); ctx.closePath(); }
-      else ctx.ellipse(x, y, ship * 0.8, ship * 0.45, 0, 0, Math.PI * 2);
+      if (s.kind === 'war') { ctx.moveTo(x, y - size); ctx.lineTo(x + size * 0.7, y + size * 0.6); ctx.lineTo(x - size * 0.7, y + size * 0.6); ctx.closePath(); }
+      else ctx.ellipse(x, y, size * 0.8, size * 0.45, 0, 0, Math.PI * 2);
       ctx.fill(); ctx.stroke();
-      if (s.kind === 'war' && s.hp < 100) {
-        ctx.fillStyle = '#e33'; ctx.fillRect(x - ship, y + ship, ship * 2, 3);
-        ctx.fillStyle = '#3e3'; ctx.fillRect(x - ship, y + ship, (ship * 2 * s.hp) / 100, 3);
+      if (s.kind === 'war' && s.hp < WARSHIP_HP) {
+        ctx.fillStyle = '#e33'; ctx.fillRect(x - size, y + size, size * 2, 3);
+        ctx.fillStyle = '#3e3'; ctx.fillRect(x - size, y + size, (size * 2 * s.hp) / WARSHIP_HP, 3);
       }
-      if (s.kind === 'transport' && sc > 2 && g.canSee(this.me, s.p)) {
+      if (s.kind === 'transport' && this.scale > 2 && g.canSee(this.me, s.p)) {
         ctx.font = 'bold 11px sans-serif';
         ctx.fillStyle = '#fff';
-        ctx.fillText(fmt(s.value), x, y - ship - 4);
+        ctx.fillText(fmt(s.value), x, y - size - 4);
       }
     }
+  }
 
+  private drawNukes() {
+    const ctx = this.ctx, g = this.g, sc = this.scale;
     for (const n of g.nukes) {
       const fx = this.sx(n.from), fy = this.sy(n.from), tx = this.sx(n.to), ty = this.sy(n.to);
-      const k = Math.min(1, (g.tick - n.launch + alpha) / (n.impact - n.launch)), lift = Math.hypot(tx - fx, ty - fy) * 0.3;
+      const k = Math.min(1, (g.tick - n.launch + this.alpha) / (n.impact - n.launch)), lift = Math.hypot(tx - fx, ty - fy) * 0.3;
       const at = (q: number) => [fx + (tx - fx) * q, fy + (ty - fy) * q - Math.sin(Math.PI * q) * lift];
       ctx.setLineDash([6, 6]);
       ctx.strokeStyle = 'rgba(255,60,60,0.9)';
@@ -192,32 +228,37 @@ export class Renderer {
       ctx.setLineDash([]);
       ctx.strokeStyle = 'rgba(255,200,80,0.7)';
       ctx.beginPath();
-      for (let q = 0; q <= k; q += 0.02) { const [x, y] = at(q); q ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+      for (let q = 0; q <= k; q += 0.02) {
+        const [x, y] = at(q);
+        if (q) ctx.lineTo(x, y);
+        else ctx.moveTo(x, y);
+      }
       ctx.stroke();
       const [hx, hy] = at(k);
       ctx.fillStyle = '#ffec6e';
       ctx.beginPath(); ctx.arc(hx, hy, 4, 0, Math.PI * 2); ctx.fill();
     }
-
-    for (const bl of g.blasts) {
-      const age = (g.tick - bl.tick + alpha) / 20, x = this.sx(bl.tile), y = this.sy(bl.tile);
-      const R = (bl.intercepted ? 4 : NUKE_R) * sc * Math.min(1, age * 3 + 0.2);
+    for (const b of g.blasts) {
+      const age = (g.tick - b.tick + this.alpha) / BLAST_TICKS, x = this.sx(b.tile), y = this.sy(b.tile);
+      const R = (b.intercepted ? 4 : NUKE_R) * sc * Math.min(1, age * 3 + 0.2);
       const grad = ctx.createRadialGradient(x, y, 0, x, y, R);
-      grad.addColorStop(0, bl.intercepted ? `rgba(200,230,255,${1 - age})` : `rgba(255,255,220,${1 - age})`);
-      grad.addColorStop(0.5, bl.intercepted ? `rgba(120,180,255,${(1 - age) * 0.7})` : `rgba(255,140,40,${(1 - age) * 0.8})`);
+      grad.addColorStop(0, b.intercepted ? `rgba(200,230,255,${1 - age})` : `rgba(255,255,220,${1 - age})`);
+      grad.addColorStop(0.5, b.intercepted ? `rgba(120,180,255,${(1 - age) * 0.7})` : `rgba(255,140,40,${(1 - age) * 0.8})`);
       grad.addColorStop(1, 'rgba(255,60,0,0)');
       ctx.fillStyle = grad;
       ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
     }
+  }
 
+  private drawLabels() {
+    const ctx = this.ctx, g = this.g, sc = this.scale;
     ctx.strokeStyle = '#000';
     for (const p of g.players) {
-      const c = cs[p.id - 1];
-      if (!p.alive || !c.n) continue;
-      const size = Math.min(48, Math.sqrt(c.n) * sc * 0.22);
-      if (size < 7) continue;
-      const x = this.ox + (c.x / c.n + 0.5) * sc, y = this.oy + (c.y / c.n + 0.5) * sc;
-      const label = (g.bounties.some(bn => bn.target === p.id) ? '🎯 ' : '') + p.name;
+      if (!p.alive || !p.tiles) continue;
+      const size = Math.min(48, Math.sqrt(p.tiles) * sc * 0.22);
+      if (size < MIN_LABEL_PX) continue;
+      const x = this.ox + (p.sumX / p.tiles + 0.5) * sc, y = this.oy + (p.sumY / p.tiles + 0.5) * sc;
+      const label = (g.bounties.some(b => b.target === p.id) ? '🎯 ' : '') + p.name;
       ctx.font = `bold ${size}px sans-serif`;
       ctx.lineWidth = size / 5;
       ctx.fillStyle = p.id === this.me ? '#ffd34d' : g.allied(this.me, p.id) ? '#9ef' : '#fff';
@@ -229,14 +270,31 @@ export class Renderer {
       ctx.strokeText(troops, x, y + size * 0.9);
       ctx.fillText(troops, x, y + size * 0.9);
     }
-
     ctx.font = '26px sans-serif';
     for (const e of g.emojis) {
-      const c = cs[e.target - 1];
-      if (!c?.n) continue;
-      ctx.globalAlpha = 1 - (g.tick - e.tick) / 50;
-      ctx.fillText(e.emoji, this.ox + (c.x / c.n) * sc, this.oy + (c.y / c.n) * sc - 30 - (g.tick - e.tick));
+      const p = g.pl(e.target), age = g.tick - e.tick;
+      if (!p.tiles) continue;
+      ctx.globalAlpha = 1 - age / EMOJI_TICKS;
+      ctx.fillText(e.emoji, this.ox + (p.sumX / p.tiles) * sc, this.oy + (p.sumY / p.tiles) * sc - 30 - age);
     }
     ctx.globalAlpha = 1;
+  }
+
+  // Optimistic markers for intents sent but not yet confirmed by a turn.
+  private drawPending(pending: Pending[], now: number) {
+    const ctx = this.ctx;
+    ctx.font = 'bold 12px sans-serif';
+    for (const p of pending) {
+      if (p.tile < 0) continue;
+      const x = this.sx(p.tile), y = this.sy(p.tile), t = ((now - p.at) / 600) % 1;
+      ctx.strokeStyle = `rgba(255,255,255,${1 - t})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(x, y, 6 + t * 14, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 3;
+      ctx.strokeText(p.label, x, y - 22);
+      ctx.fillText(p.label, x, y - 22);
+    }
   }
 }
